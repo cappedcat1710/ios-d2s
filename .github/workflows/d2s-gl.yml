@@ -2,6 +2,10 @@ name: d2s-gl
 
 on:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: GitHub runner label
+        default: macos-15
   push:
     paths:
       - 'tools/d2s-gl/**'
@@ -10,7 +14,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || 'macos-15' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
