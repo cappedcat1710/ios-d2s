@@ -1,0 +1,73 @@
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -1244,6 +1244,25 @@
+ 	return cpu->cluster_id;
+ }
+ 
++#if defined(D2S)
++/*
++ * Exynos 9825: the A55/A75 (DynamIQ) cores report MPIDR with MT=1, Aff0=0
++ * and the core number in Aff1 (boot A55 0x81000000, A55 cpu1 0x81000100);
++ * the M4s report 0x100/0x101. The ADT and PSCI use Samsung's numbering
++ * (A55/A75 0..5, M4 0x100/0x101), so translate before matching phys_id:
++ * the Aff1:Aff0 match gave A55 cpu1 the M4's logical number (pe_fiq.c GIC
++ * mask) and A55 cpu2..A75 no number at all (cpuid.c index).
++ */
++static uint32_t
++d2s_mpidr_to_phys_id(uint64_t mpidr)
++{
++	if (mpidr & (1ULL << 24)) {
++		return (uint32_t)((mpidr >> 8) & 0xff);
++	}
++	return (uint32_t)(mpidr & (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK));
++}
++#endif
++
+ unsigned int
+ ml_get_cpu_number_local(void)
+ {
+@@ -1252,7 +1271,11 @@
+ 
+ 	/* We identify the CPU based on the constant bits of MPIDR_EL1. */
+ 	MRS(mpidr_el1_value, "MPIDR_EL1");
++#if defined(D2S)
++	cpu_id = ml_get_cpu_number(d2s_mpidr_to_phys_id(mpidr_el1_value));
++#else
+ 	cpu_id = ml_get_cpu_number((uint32_t)mpidr_el1_value);
++#endif
+ 
+ 	assert(cpu_id <= (unsigned int)ml_get_max_cpu_number());
+ 
+@@ -1267,7 +1290,11 @@
+ 
+ 	/* We identify the cluster based on the constant bits of MPIDR_EL1. */
+ 	MRS(mpidr_el1_value, "MPIDR_EL1");
++#if defined(D2S)
++	cluster_id = ml_get_cluster_number(d2s_mpidr_to_phys_id(mpidr_el1_value));
++#else
+ 	cluster_id = ml_get_cluster_number((uint32_t)mpidr_el1_value);
++#endif
+ 
+ 	assert(cluster_id <= (unsigned int)ml_get_max_cluster_number());
+ 
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -145,6 +145,16 @@
+ 	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
+ #if HAS_CLUSTER || defined(SWEET)
+ 	and		x0, x15, #0xFFFF					// Full Aff1:Aff0 (SWEET: core in Aff1)
++#if defined(D2S)
++	/*
++	 * Exynos 9825 A55/A75 (DynamIQ): MT=1, core number in Aff1 (A75 cpu4
++	 * reads 0x81000400, measured), while the ADT/PSCI numbering is 0..5.
++	 * Normalize to that numbering; the M4s (no MT) keep 0x100/0x101.
++	 */
++	tbz		x15, #24, Ld2s_mpidr_plain
++	ubfx	x0, x15, #8, #8
++Ld2s_mpidr_plain:
++#endif
+ #else
+ 	and		x0, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
+ #endif
