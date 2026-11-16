@@ -1,0 +1,93 @@
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -326,9 +326,36 @@
+ Lsweet_secondary_bad_el:
+ 	b		.
+ Lsweet_secondary_el1:
++#if defined(D2S)
++	/*
++	 * Exynos 9825: select the CPU data by the PSCI context_id, not MPIDR.
++	 * The A55/A75 (DynamIQ) cores report the core number in MPIDR Aff1
++	 * (MT=1, Aff0=0), so reset_vector's Aff1:Aff0 match finds no entry for
++	 * the ADT's firmware numbering (0x1..0x5) and ends in "b ." (cpus=8:
++	 * cpu=3 target 0x1 "NOT alive"), or collides with the M4 at 0x100.
++	 * SweetCPU::startCPU passes the logical CPU number as context_id, and
++	 * CpuDataEntries is indexed by it (cpu_data_register).
++	 */
++	msr		SPSel, #1
++	msr		OSLAR_EL1, xzr
++	adrp	x1, EXT(LowExceptionVectorBase)@page
++	add		x1, x1, EXT(LowExceptionVectorBase)@pageoff
++	msr		VBAR_EL1, x1
++	isb
++	cmp		x0, #MAX_CPUS
++	b.hs	Lsweet_secondary_bad_el
++	adrp	x19, EXT(ResetHandlerData)@page
++	add		x19, x19, EXT(ResetHandlerData)@pageoff
++	ldr		x1, [x19, CPU_DATA_ENTRIES]
++	add		x1, x1, x0, lsl #4				// 16-byte cpu_data_entry_t
++	ldr		x21, [x1, CPU_DATA_PADDR]
++	cbz		x21, Lsweet_secondary_bad_el
++	b		Lfound_cpu_data_entry
++#else
+ 	/* x0 is deliberately unused; reset_vector selects CPU data by MPIDR. */
+ 	msr		SPSel, #1
+ 	b		EXT(LowResetVectorBase)
++#endif
+ #endif /* SWEET */
+ 
+ 	.align 2
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -1244,6 +1244,25 @@
+ 	return cpu->cluster_id;
+ }
+ 
++#if defined(D2S)
++/*
++ * Exynos 9825: the A55/A75 (DynamIQ) cores report MPIDR with MT=1, Aff0=0
++ * and the core number in Aff1 (boot A55 0x81000000, A55 cpu1 0x81000100);
++ * the M4s report 0x100/0x101. The ADT and PSCI use Samsung's numbering
++ * (A55/A75 0..5, M4 0x100/0x101), so translate before matching phys_id:
++ * the Aff1:Aff0 match gave A55 cpu1 the M4's logical number (pe_fiq.c GIC
++ * mask) and A55 cpu2..A75 no number at all (cpuid.c index).
++ */
++static uint32_t
++d2s_mpidr_to_phys_id(uint64_t mpidr)
++{
++	if (mpidr & (1ULL << 24)) {
++		return (uint32_t)((mpidr >> 8) & 0xff);
++	}
++	return (uint32_t)(mpidr & (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK));
++}
++#endif
++
+ unsigned int
+ ml_get_cpu_number_local(void)
+ {
+@@ -1252,7 +1271,11 @@
+ 
+ 	/* We identify the CPU based on the constant bits of MPIDR_EL1. */
+ 	MRS(mpidr_el1_value, "MPIDR_EL1");
++#if defined(D2S)
++	cpu_id = ml_get_cpu_number(d2s_mpidr_to_phys_id(mpidr_el1_value));
++#else
+ 	cpu_id = ml_get_cpu_number((uint32_t)mpidr_el1_value);
++#endif
+ 
+ 	assert(cpu_id <= (unsigned int)ml_get_max_cpu_number());
+ 
+@@ -1267,7 +1290,11 @@
+ 
+ 	/* We identify the cluster based on the constant bits of MPIDR_EL1. */
+ 	MRS(mpidr_el1_value, "MPIDR_EL1");
++#if defined(D2S)
++	cluster_id = ml_get_cluster_number(d2s_mpidr_to_phys_id(mpidr_el1_value));
++#else
+ 	cluster_id = ml_get_cluster_number((uint32_t)mpidr_el1_value);
++#endif
+ 
+ 	assert(cluster_id <= (unsigned int)ml_get_max_cluster_number());
+ 
