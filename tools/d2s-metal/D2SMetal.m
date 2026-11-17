@@ -26,6 +26,7 @@
  * stub for the rest) follows hakios' HakiosMetal.m (MIT); rewritten here.
  */
 #import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #include <stdarg.h>
@@ -118,7 +119,9 @@ stubSignature(id self, SEL _cmd, SEL selector)
 	id (*send)(struct objc_super *, SEL, SEL) = (id (*)(struct objc_super *, SEL, SEL))objc_msgSendSuper;
 	id sig = send(&sup, @selector(methodSignatureForSelector:), selector);
 	if (sig == nil) {
-		sayc("no signature for -%s on %s: Metal will raise", sel_getName(selector), class_getName(object_getClass(self)));
+		/* unknown to every protocol we know: answer a plain 8-byte zero instead of letting Metal raise */
+		sayc("no signature for -%s on %s: guessed Q@:", sel_getName(selector), class_getName(object_getClass(self)));
+		sig = [NSMethodSignature signatureWithObjCTypes:"Q@:"];
 	}
 	return sig;
 }
@@ -1078,6 +1081,17 @@ d2sMetalLoad(void)
 	if (gBase == Nil) {
 		sayc("no _MTLDevice on this system");
 		return;
+	}
+	/* the public protocols compiled in from the SDK headers: the on-device Metal binary has no runtime
+	 * copy of some (MTLRenderCommandEncoder, MTLBlitCommandEncoder, ...), and the stub needs their selectors */
+	Protocol *extra[] = { @protocol(MTLRenderCommandEncoder), @protocol(MTLBlitCommandEncoder),
+		@protocol(MTLComputeCommandEncoder), @protocol(MTLCommandEncoder), @protocol(MTLParallelRenderCommandEncoder),
+		@protocol(MTLCommandBuffer), @protocol(MTLCommandQueue), @protocol(MTLTexture), @protocol(MTLBuffer),
+		@protocol(MTLResource), @protocol(MTLRenderPipelineState), @protocol(MTLComputePipelineState),
+		@protocol(MTLDepthStencilState), @protocol(MTLSamplerState), @protocol(MTLDevice), @protocol(MTLLibrary),
+		@protocol(MTLFunction), @protocol(MTLFence), @protocol(MTLEvent), @protocol(MTLSharedEvent) };
+	for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]) && gNProtocols < MAX_PROTOCOLS; i++) {
+		gProtocols[gNProtocols++] = extra[i];
 	}
 	addProtocolFamily("MTLDevice");
 	addProtocolFamily("MTLBuffer");
