@@ -251,6 +251,7 @@ quad_test(struct pipe_screen *screen, struct pipe_context *pipe, struct pipe_res
 	ve[1].src_offset = 16;
 	for (int i = 0; i < 2; i++) {
 		ve[i].vertex_buffer_index = 0;
+		ve[i].src_stride = 32;	/* bytes per vertex: 8 floats */
 	}
 	void *vels = pipe->create_vertex_elements_state(pipe, 2, ve);
 	if (!rast || !blend || !dsas || !samp || !sv || !vs || !fs || !vels) {
@@ -263,10 +264,17 @@ quad_test(struct pipe_screen *screen, struct pipe_context *pipe, struct pipe_res
 		{ -1, -1, 0, 1,  0, 1, 0, 1 }, { 1, -1, 0, 1,  1, 1, 0, 1 },
 		{ -1,  1, 0, 1,  0, 0, 0, 1 }, { 1,  1, 0, 1,  1, 0, 0, 1 },
 	};
+	/* panfrost has no user-buffer path (u_vbuf normally wraps it): use a real buffer */
+	struct pipe_resource *vbuf = pipe_buffer_create_with_data(pipe, PIPE_BIND_VERTEX_BUFFER,
+	    PIPE_USAGE_IMMUTABLE, sizeof(verts), verts);
+	if (vbuf == NULL) {
+		say("QUAD FAIL: vertex buffer");
+		return 0;
+	}
 	struct pipe_vertex_buffer vb;
 	memset(&vb, 0, sizeof(vb));
-	vb.is_user_buffer = true;
-	vb.buffer.user = verts;
+	vb.buffer.resource = vbuf;
+	vb.buffer_offset = 0;
 	pipe->bind_rasterizer_state(pipe, rast);
 	pipe->bind_blend_state(pipe, blend);
 	pipe->bind_depth_stencil_alpha_state(pipe, dsas);
@@ -322,6 +330,7 @@ quad_test(struct pipe_screen *screen, struct pipe_context *pipe, struct pipe_res
 	pipe->set_sampler_views(pipe, MESA_SHADER_FRAGMENT, 0, 0, 1, NULL);
 	pipe_sampler_view_reference(&sv, NULL);
 	pipe_resource_reference(&src_res, NULL);
+	pipe_resource_reference(&vbuf, NULL);
 	CFRelease(src);
 	return done && good == w * h;
 }
