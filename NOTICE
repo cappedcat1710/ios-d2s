@@ -1,0 +1,24 @@
+ios-d2s fork for the Samsung Galaxy Note 10+ (d2s)
+
+This repository combines original work with material from other projects. Each keeps its own
+license. Not an exhaustive legal review.
+
+- Apple XNU (xnu-8796) and Apple open-source components: APSL 2.0,
+  https://opensource.apple.com/apsl/. The patches in xnu/patches/ are derivative works of XNU.
+- Upstream ports this fork builds on: gorkemoji/ios-d2s, orhunnx/ios-a5xelte,
+  dipa-studio/ios-sweet. They did not state an overall license at the time of writing (see
+  README), so their original files are kept as published, with their authors credited.
+- Code written after Linux drivers (for example shim/dreamlte/touch_probe.c): GPL-2.0, see the
+  SPDX headers of each file.
+- Mesa 3D (mesa-26.2.6), including the Panfrost Gallium driver: MIT and related permissive
+  licenses, https://www.mesa3d.org/license.html. This repository holds only build scripts and
+  patches (tools/d2s-gl); Mesa is fetched at build time from freedesktop.org.
+- libdrm headers (tools/d2s-gl/libdrm): MIT.
+- Ideas and public documentation consulted, with no code copied unless a file says so:
+    * hakios, https://github.com/oosexgang/hakios-xnu-kernel (MIT, and APSL for XNU-derived files)
+    * ios-sailfish, https://github.com/joranv1/ios-sailfish
+    * UniXNU, https://github.com/UniXNU/UniXNU
+  The Metal plug-in approach (a private-base subclass built at load time with a logged stub)
+  follows hakios' HakiosMetal.m (MIT); tools/d2s-metal/D2SMetal.m is a rewrite for this device.
+- Tools used at build time: blacktop/darwin-xnu-build, blacktop/ipsw, uniLoader and others;
+  see the README credits.

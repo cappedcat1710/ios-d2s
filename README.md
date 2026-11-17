@@ -13,7 +13,7 @@ Work in this fork (branch `d2s-smp`, details in `xnu/patches/` and `tools/`):
 
 Build: kernel patches build in CI (`.github/workflows/xnu.yml`, run with `-f runner=macos-15-intel`); the GPU/Metal userland builds with `d2s-gl.yml` (`-f what=all|gl|metal`). Images are packed with `tools/d2s_make_boot.py`; user-space files ride in the boot image via `tools/mkfiles.py`.
 
-Thanks to the upstream authors and to [hakios](https://github.com/oosexgang/hakios-xnu-kernel) and [ios-sailfish](https://github.com/joranv1/ios-sailfish), whose public write-ups guided the GPU and Metal approach. Not affiliated with Apple; no Apple binaries are in this repository.
+Thanks to the upstream authors and to [hakios](https://github.com/oosexgang/hakios-xnu-kernel) and [ios-sailfish](https://github.com/joranv1/ios-sailfish), whose public write-ups guided the GPU and Metal approach. Not affiliated with Apple or Samsung; no Apple binaries are in this repository. See [LEGAL.md](LEGAL.md), [NOTICE](NOTICE) and [LICENSE](LICENSE). Flashing can erase data or brick a device; use at your own risk.
 
 ---
 
