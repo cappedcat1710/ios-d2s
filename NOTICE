@@ -22,3 +22,6 @@ license. Not an exhaustive legal review.
   follows hakios' HakiosMetal.m (MIT); tools/d2s-metal/D2SMetal.m is a rewrite for this device.
 - Tools used at build time: blacktop/darwin-xnu-build, blacktop/ipsw, uniLoader and others;
   see the README credits.
+- tools/d2s-metal/air/: the AIR to NIR shader frontend from hakios (MIT, "Darwin on redwood
+  contributors"), ported to Mesa 26.2.6 here; license headers kept, changes listed in
+  tools/d2s-metal/air/README-d2s.md.
