@@ -92,7 +92,7 @@ static uint64_t
 deviceFeatureProfile(id self, SEL _cmd)
 {
 	(void)self; (void)_cmd;
-	return 11;	/* MTLFeatureSet_iOS_GPUFamily4_v1 (guess, to see what Metal asks next) */
+	return 7;	/* initLimits compares the profile with 0,1,4,5,6,7,8,9; 7 is the lowest that gives 8 colour attachments (guess) */
 }
 
 /* a signature for a message the device does not implement: from the Metal protocols, so the stub knows the return size */
