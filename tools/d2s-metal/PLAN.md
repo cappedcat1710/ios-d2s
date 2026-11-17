@@ -15,3 +15,14 @@ end with Panfrost's Gallium driver (tools/d2s-gl/pantest.c shows the calls).
 3. AIR (Apple shader bitcode) to NIR front end, then Panfrost compiles NIR.
 4. Render/compute encoders as Gallium draws and dispatches.
 5. QuartzCore's default.metallib, present path through IOSurface.
+
+## Staged bring-up (2026-11-17)
+
+CoreAnimation commits to Metal as soon as a device exists and crashes if the
+device then fails (boots 11-13: null Metal context in EAGLServer::renderer),
+so the device is only registered in processes with D2SMETAL=1.
+
+- metaltest.dylib, inserted into DumpPanic (d2senv), sets it and walks the
+  path the UI needs: device, queue, buffer, texture, then CARenderer drawing
+  a layer into an MTLTexture (CoreAnimation's own Metal renderer).
+- When step 5 draws, d2senv=backboardd:D2SMETAL=1 puts the UI on Metal.
