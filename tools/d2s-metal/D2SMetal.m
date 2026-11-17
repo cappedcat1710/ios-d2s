@@ -431,9 +431,9 @@ static uint64_t tex_mips(id self, SEL _cmd) { (void)_cmd; return tex(self)->mips
 static uint64_t tex_array(id self, SEL _cmd) { (void)_cmd; return tex(self)->arrayLength ? tex(self)->arrayLength : 1; }
 static uint64_t tex_gpu(id self, SEL _cmd) { (void)_cmd; return tex(self)->b.gpu_va; }
 
-typedef struct { uint64_t x, y, z; } Origin;
-typedef struct { uint64_t w, h, d; } Size;
-typedef struct { Origin o; Size s; } Region;
+typedef struct { uint64_t x, y, z; } D2SOrigin;
+typedef struct { uint64_t w, h, d; } D2SSize;
+typedef struct { D2SOrigin o; D2SSize s; } D2SRegion;
 
 static uint8_t *
 texBase(struct texture *t)
@@ -442,7 +442,7 @@ texBase(struct texture *t)
 }
 
 static void
-texReplace(id self, SEL _cmd, Region r, uint64_t level, const void *bytes, uint64_t bpr)
+texReplace(id self, SEL _cmd, D2SRegion r, uint64_t level, const void *bytes, uint64_t bpr)
 {
 	(void)_cmd;
 	struct texture *t = tex(self);
@@ -456,14 +456,14 @@ texReplace(id self, SEL _cmd, Region r, uint64_t level, const void *bytes, uint6
 }
 
 static void
-texReplace6(id self, SEL _cmd, Region r, uint64_t level, uint64_t slice, const void *bytes, uint64_t bpr, uint64_t bpi)
+texReplace6(id self, SEL _cmd, D2SRegion r, uint64_t level, uint64_t slice, const void *bytes, uint64_t bpr, uint64_t bpi)
 {
 	(void)slice; (void)bpi;
 	texReplace(self, _cmd, r, level, bytes, bpr);
 }
 
 static void
-texGet(id self, SEL _cmd, void *bytes, uint64_t bpr, Region r, uint64_t level)
+texGet(id self, SEL _cmd, void *bytes, uint64_t bpr, D2SRegion r, uint64_t level)
 {
 	(void)_cmd;
 	struct texture *t = tex(self);
@@ -476,7 +476,7 @@ texGet(id self, SEL _cmd, void *bytes, uint64_t bpr, Region r, uint64_t level)
 }
 
 static void
-texGet6(id self, SEL _cmd, void *bytes, uint64_t bpr, uint64_t bpi, Region r, uint64_t level, uint64_t slice)
+texGet6(id self, SEL _cmd, void *bytes, uint64_t bpr, uint64_t bpi, D2SRegion r, uint64_t level, uint64_t slice)
 {
 	(void)bpi; (void)slice;
 	texGet(self, _cmd, bytes, bpr, r, level);
