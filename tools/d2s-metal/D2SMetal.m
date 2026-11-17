@@ -45,7 +45,7 @@ static pthread_mutex_t gLock = PTHREAD_MUTEX_INITIALIZER;
 static NSMutableSet *gSeen;
 static Class gQueueClass, gBufferClass, gTextureClass;
 
-#define MAX_PROTOCOLS 24
+#define MAX_PROTOCOLS 64
 static Protocol *gProtocols[MAX_PROTOCOLS];
 static int gNProtocols;
 
@@ -149,8 +149,9 @@ stubForward(id self, SEL _cmd, NSInvocation *inv)
 }
 
 /* every object made here: one pointer of our own state */
-static ptrdiff_t gStateOffset[5];
-enum { K_QUEUE, K_BUFFER, K_TEXTURE, K_PIPE };
+static ptrdiff_t gStateOffset[8];
+enum { K_QUEUE, K_BUFFER, K_TEXTURE, K_PIPE, K_CB, K_ENC };
+static Class gCBClass, gRenderEncClass, gBlitEncClass, gComputeEncClass;
 
 static void **
 stateOf(id obj, int kind)
@@ -294,13 +295,22 @@ nothingRange(id self, SEL _cmd, NSRange r)
 	(void)self; (void)_cmd; (void)r;
 }
 
+static int
+kindOf(id obj)
+{
+	Class c = object_getClass(obj);
+	if (c == gQueueClass) return K_QUEUE;
+	if (c == gBufferClass) return K_BUFFER;
+	if (c == gCBClass) return K_CB;
+	if (c == gRenderEncClass || c == gBlitEncClass || c == gComputeEncClass) return K_ENC;
+	return K_TEXTURE;
+}
+
 static id
 labelGet(id self, SEL _cmd)
 {
 	(void)_cmd;
-	Class c = object_getClass(self);
-	int kind = c == gQueueClass ? K_QUEUE : c == gBufferClass ? K_BUFFER : K_TEXTURE;
-	struct common *s = *stateOf(self, kind);
+	struct common *s = *stateOf(self, kindOf(self));
 	return s ? s->label : nil;
 }
 
@@ -308,9 +318,7 @@ static void
 labelSet(id self, SEL _cmd, id label)
 {
 	(void)_cmd;
-	Class c = object_getClass(self);
-	int kind = c == gBufferClass ? K_BUFFER : K_TEXTURE;
-	struct common *s = *stateOf(self, kind);
+	struct common *s = *stateOf(self, kindOf(self));
 	if (s != NULL) {
 		id old = s->label;
 		s->label = [label copy];
@@ -374,6 +382,8 @@ bytesPerPixel(uint64_t fmt)
 	}
 }
 
+static struct texture *tex(id self);
+static struct texture *tex_(id o) { return tex(o); }
 static struct texture *
 tex(id self)
 {
@@ -575,11 +585,21 @@ deviceSampleCount(id s, SEL c, uint64_t n)
 	return n == 1 || n == 4;
 }
 
+struct queue {
+	struct common c;
+	dispatch_queue_t q;
+};
+
 static id
 newQueue(id self)
 {
 	id q = class_createInstance(gQueueClass, 0);
 	q = ((id (*)(id, SEL, id))objc_msgSend)(q, @selector(initWithDevice:), self);
+	if (q != nil) {
+		struct queue *s = calloc(1, sizeof(*s));
+		s->q = dispatch_queue_create("d2s.metal.queue", DISPATCH_QUEUE_SERIAL);
+		*stateOf(q, K_QUEUE) = s;
+	}
 	static int logged;
 	if (logged++ < 4) {
 		sayc("newCommandQueue -> %p", q);
@@ -751,6 +771,301 @@ deviceNewComputePipe(id self, SEL _cmd, id fn, id *err)
 	return ((id (*)(id, SEL))objc_msgSend)(o, @selector(init));
 }
 
+/* ===== command buffers and encoders =====================================
+ * Our own _MTLCommandBuffer subclass: commit runs on the queue's serial
+ * dispatch queue (scheduled handlers, the recorded work, completed
+ * handlers); waitUntilCompleted waits on a semaphore. The recorded work is
+ * only clears for now (done on the CPU at endEncoding); draws are counted
+ * and logged by pipeline name so the next step knows which shaders to make.
+ */
+struct cb {
+	struct common c;
+	id queue;			/* retained */
+	NSMutableArray *completed, *scheduled;
+	int status;			/* MTLCommandBufferStatus */
+	BOOL committed;
+	dispatch_semaphore_t done;
+	int encoders, draws;
+};
+
+struct enc {
+	struct common c;
+	id cb;				/* retained */
+	int type;			/* 0 render, 1 blit, 2 compute */
+	int draws, pipeSets, ended;
+	id pipeline;			/* last set, retained */
+	id color0;			/* render target, retained */
+	uint64_t load;
+	double clear[4];
+	char seen[96];			/* first pipeline names seen, for the log */
+};
+
+static struct cb *cbs(id o) { return (struct cb *)*stateOf(o, K_CB); }
+static struct enc *encs(id o) { return (struct enc *)*stateOf(o, K_ENC); }
+
+static id
+queueCommandBuffer(id self, SEL _cmd)
+{
+	(void)_cmd;
+	id o = class_createInstance(gCBClass, 0);
+	o = ((id (*)(id, SEL))objc_msgSend)(o, @selector(init));
+	struct cb *c = calloc(1, sizeof(*c));
+	c->queue = [self retain];
+	c->completed = [NSMutableArray new];
+	c->scheduled = [NSMutableArray new];
+	c->done = dispatch_semaphore_create(0);
+	*stateOf(o, K_CB) = c;
+	return [o autorelease];
+}
+
+static id queueCommandBufferD(id self, SEL _cmd, id d) { (void)d; return queueCommandBuffer(self, _cmd); }
+
+static void
+cbCommit(id self, SEL _cmd)
+{
+	(void)_cmd;
+	struct cb *c = cbs(self);
+	if (c == NULL || c->committed) {
+		return;
+	}
+	c->committed = YES;
+	c->status = 2;
+	struct queue *q = *stateOf(c->queue, K_QUEUE);
+	[self retain];
+	dispatch_async(q->q, ^{
+		c->status = 3;
+		for (void (^h)(id) in c->scheduled) {
+			h(self);
+		}
+		c->status = 4;
+		for (void (^h)(id) in c->completed) {
+			h(self);
+		}
+		dispatch_semaphore_signal(c->done);
+		[self release];
+	});
+}
+
+static void cbEnqueue(id self, SEL _cmd) { (void)self; (void)_cmd; }
+
+static void
+cbWait(id self, SEL _cmd)
+{
+	(void)_cmd;
+	struct cb *c = cbs(self);
+	if (c != NULL && c->committed) {
+		dispatch_semaphore_wait(c->done, DISPATCH_TIME_FOREVER);
+		dispatch_semaphore_signal(c->done);
+	}
+}
+
+static void cbWaitScheduled(id self, SEL _cmd) { cbWait(self, _cmd); }
+
+static void
+cbAddCompleted(id self, SEL _cmd, void (^h)(id))
+{
+	(void)_cmd;
+	struct cb *c = cbs(self);
+	if (c != NULL && !c->committed && h != nil) {
+		[c->completed addObject:[[h copy] autorelease]];
+	}
+}
+
+static void
+cbAddScheduled(id self, SEL _cmd, void (^h)(id))
+{
+	(void)_cmd;
+	struct cb *c = cbs(self);
+	if (c != NULL && !c->committed && h != nil) {
+		[c->scheduled addObject:[[h copy] autorelease]];
+	}
+}
+
+static uint64_t cbStatus(id self, SEL _cmd) { (void)_cmd; return cbs(self) ? (uint64_t)cbs(self)->status : 0; }
+static id cbError(id self, SEL _cmd) { (void)self; (void)_cmd; return nil; }
+static id cbQueue(id self, SEL _cmd) { (void)_cmd; return cbs(self)->queue; }
+static double cbTime(id self, SEL _cmd) { (void)self; (void)_cmd; return 0; }
+static BOOL cbRetained(id self, SEL _cmd) { (void)self; (void)_cmd; return YES; }
+
+static void
+cbDealloc(id self, SEL _cmd)
+{
+	(void)_cmd;
+	struct cb *c = cbs(self);
+	if (c != NULL) {
+		[c->queue release];
+		[c->completed release];
+		[c->scheduled release];
+		[c->c.label release];
+		free(c);
+	}
+	struct objc_super sup = { self, class_getSuperclass(gCBClass) };
+	((void (*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, @selector(dealloc));
+}
+
+static id
+makeEncoder(id cbo, Class cls, int type)
+{
+	id e = class_createInstance(cls, 0);
+	e = ((id (*)(id, SEL))objc_msgSend)(e, @selector(init));
+	struct enc *s = calloc(1, sizeof(*s));
+	s->cb = [cbo retain];
+	s->type = type;
+	*stateOf(e, K_ENC) = s;
+	cbs(cbo)->encoders++;
+	return e;
+}
+
+typedef struct { double r, g, b, a; } D2SClear;
+
+static id
+cbRenderEncoder(id self, SEL _cmd, id desc)
+{
+	(void)_cmd;
+	id e = makeEncoder(self, gRenderEncClass, 0);
+	struct enc *s = encs(e);
+	id arr = ((id (*)(id, SEL))objc_msgSend)(desc, sel_registerName("colorAttachments"));
+	id ca = ((id (*)(id, SEL, uint64_t))objc_msgSend)(arr, sel_registerName("objectAtIndexedSubscript:"), 0);
+	if (ca != nil) {
+		id t = ((id (*)(id, SEL))objc_msgSend)(ca, sel_registerName("texture"));
+		s->color0 = [t retain];
+		s->load = ((uint64_t (*)(id, SEL))objc_msgSend)(ca, sel_registerName("loadAction"));
+		D2SClear cc = ((D2SClear (*)(id, SEL))objc_msgSend)(ca, sel_registerName("clearColor"));
+		s->clear[0] = cc.r; s->clear[1] = cc.g; s->clear[2] = cc.b; s->clear[3] = cc.a;
+	}
+	return [e autorelease];
+}
+
+static id cbBlitEncoder(id self, SEL _cmd) { (void)_cmd; return [makeEncoder(self, gBlitEncClass, 1) autorelease]; }
+static id cbBlitEncoderD(id self, SEL _cmd, id d) { (void)d; return cbBlitEncoder(self, _cmd); }
+static id cbComputeEncoder(id self, SEL _cmd) { (void)_cmd; return [makeEncoder(self, gComputeEncClass, 2) autorelease]; }
+static id cbComputeEncoderD(id self, SEL _cmd, id d) { (void)d; return cbComputeEncoder(self, _cmd); }
+static id cbComputeEncoderT(id self, SEL _cmd, uint64_t t) { (void)t; return cbComputeEncoder(self, _cmd); }
+
+static void
+pipeNames(id pipe, char *out, size_t n)
+{
+	snprintf(out, n, "?");
+	void **slot = stateOf(pipe, K_PIPE);
+	id desc = slot ? (id)*slot : nil;
+	if (desc != nil) {
+		snprintf(out, n, "%s/%s", fnName(((id (*)(id, SEL))objc_msgSend)(desc, sel_registerName("vertexFunction"))),
+		    fnName(((id (*)(id, SEL))objc_msgSend)(desc, sel_registerName("fragmentFunction"))));
+	}
+}
+
+static void
+encSetPipeline(id self, SEL _cmd, id pipe)
+{
+	(void)_cmd;
+	struct enc *s = encs(self);
+	s->pipeSets++;
+	if (s->pipeline != pipe) {
+		[s->pipeline release];
+		s->pipeline = [pipe retain];
+	}
+	static int logged;
+	if (logged < 60 && pipe != nil) {
+		char nm[100];
+		pipeNames(pipe, nm, sizeof(nm));
+		if (strstr(s->seen, nm) == NULL) {
+			size_t l = strlen(s->seen);
+			snprintf(s->seen + l, sizeof(s->seen) - l, "%s ", nm);
+			sayc("pipeline %s", nm);
+			logged++;
+		}
+	}
+}
+
+static void
+encDraw(id self, SEL _cmd, uint64_t type, uint64_t start, uint64_t count)
+{
+	(void)_cmd; (void)type; (void)start; (void)count;
+	encs(self)->draws++;
+}
+
+static void
+fillColor(id tex, const double c[4])
+{
+	if (object_getClass(tex) != gTextureClass) {
+		return;
+	}
+	struct texture *t = tex_(tex);
+	if (t->bpp != 4 || t->rowBytes == 0) {
+		return;
+	}
+	uint8_t px[4];
+	uint8_t r = (uint8_t)(c[0] * 255.0 + 0.5), g = (uint8_t)(c[1] * 255.0 + 0.5);
+	uint8_t b = (uint8_t)(c[2] * 255.0 + 0.5), a = (uint8_t)(c[3] * 255.0 + 0.5);
+	if (t->pixelFormat == 80 || t->pixelFormat == 81) {		/* BGRA8 */
+		px[0] = b; px[1] = g; px[2] = r; px[3] = a;
+	} else if (t->pixelFormat == 70 || t->pixelFormat == 71) {	/* RGBA8 */
+		px[0] = r; px[1] = g; px[2] = b; px[3] = a;
+	} else {
+		return;
+	}
+	uint8_t *base = texBase(t);
+	for (uint64_t y = 0; y < t->height; y++) {
+		uint32_t *row = (uint32_t *)(base + y * t->rowBytes);
+		uint32_t v;
+		memcpy(&v, px, 4);
+		for (uint64_t x = 0; x < t->width; x++) {
+			row[x] = v;
+		}
+	}
+}
+
+static void
+encEnd(id self, SEL _cmd)
+{
+	(void)_cmd;
+	struct enc *s = encs(self);
+	if (s == NULL || s->ended) {
+		return;
+	}
+	s->ended = 1;
+	if (s->type == 0 && s->color0 != nil && s->load == 2) {
+		fillColor(s->color0, s->clear);
+	}
+	static int logged;
+	if (logged++ < 40) {
+		struct texture *t = s->color0 && object_getClass(s->color0) == gTextureClass ? tex_(s->color0) : NULL;
+		sayc("encoder %d ended: target %llux%llu fmt %llu load %llu clear %.2f,%.2f,%.2f,%.2f draws %d pipes %d",
+		    s->type, t ? t->width : 0, t ? t->height : 0, t ? t->pixelFormat : 0, (unsigned long long)s->load,
+		    s->clear[0], s->clear[1], s->clear[2], s->clear[3], s->draws, s->pipeSets);
+	}
+	cbs(s->cb)->draws += s->draws;
+}
+
+static id encCommandBuffer(id self, SEL _cmd) { (void)_cmd; return encs(self)->cb; }
+
+static void
+encDealloc(id self, SEL _cmd)
+{
+	(void)_cmd;
+	struct enc *s = encs(self);
+	if (s != NULL) {
+		[s->cb release];
+		[s->pipeline release];
+		[s->color0 release];
+		[s->c.label release];
+		free(s);
+	}
+	struct objc_super sup = { self, class_getSuperclass(object_getClass(self)) };
+	((void (*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, @selector(dealloc));
+}
+
+static void
+addEncoderMethods(Class c)
+{
+	class_addMethod(c, sel_registerName("endEncoding"), (IMP)encEnd, "v@:");
+	class_addMethod(c, sel_registerName("commandBuffer"), (IMP)encCommandBuffer, "@@:");
+	class_addMethod(c, @selector(device), (IMP)objDevice, "@@:");
+	class_addMethod(c, @selector(label), (IMP)labelGet, "@@:");
+	class_addMethod(c, sel_registerName("setLabel:"), (IMP)labelSet, "v@:@");
+	class_addMethod(c, @selector(dealloc), (IMP)encDealloc, "v@:");
+}
+
 __attribute__((constructor)) static void
 d2sMetalLoad(void)
 {
@@ -776,6 +1091,11 @@ d2sMetalLoad(void)
 	gQueueClass = makeClass("D2SMetalCommandQueue", "_MTLCommandQueue", qp, K_QUEUE);
 	if (gQueueClass != Nil) {
 		class_addMethod(gQueueClass, @selector(device), (IMP)objDevice, "@@:");
+		class_addMethod(gQueueClass, @selector(label), (IMP)labelGet, "@@:");
+		class_addMethod(gQueueClass, sel_registerName("setLabel:"), (IMP)labelSet, "v@:@");
+		class_addMethod(gQueueClass, sel_registerName("commandBuffer"), (IMP)queueCommandBuffer, "@@:");
+		class_addMethod(gQueueClass, sel_registerName("commandBufferWithUnretainedReferences"), (IMP)queueCommandBuffer, "@@:");
+		class_addMethod(gQueueClass, sel_registerName("commandBufferWithDescriptor:"), (IMP)queueCommandBufferD, "@@:@");
 		finishClass(gQueueClass, K_QUEUE);
 	}
 
@@ -844,6 +1164,57 @@ d2sMetalLoad(void)
 	static const char *const cpp[] = { "MTLComputePipelineState", "MTLComputePipelineStateSPI", NULL };
 	if ((gComputePipeClass = makeClass("D2SMetalComputePipelineState", "_MTLComputePipelineState", cpp, 0)) != Nil) {
 		objc_registerClassPair(gComputePipeClass);
+	}
+	addProtocolFamily("MTLCommandBuffer");
+	addProtocolFamily("MTLCommandEncoder");
+	addProtocolFamily("MTLRenderCommandEncoder");
+	addProtocolFamily("MTLBlitCommandEncoder");
+	addProtocolFamily("MTLComputeCommandEncoder");
+	static const char *const cbp[] = { "MTLCommandBuffer", "MTLCommandBufferSPI", NULL };
+	if ((gCBClass = makeClass("D2SMetalCommandBuffer", "_MTLCommandBuffer", cbp, K_CB)) != Nil) {
+		Class c = gCBClass;
+		class_addMethod(c, sel_registerName("commit"), (IMP)cbCommit, "v@:");
+		class_addMethod(c, sel_registerName("enqueue"), (IMP)cbEnqueue, "v@:");
+		class_addMethod(c, sel_registerName("waitUntilCompleted"), (IMP)cbWait, "v@:");
+		class_addMethod(c, sel_registerName("waitUntilScheduled"), (IMP)cbWaitScheduled, "v@:");
+		class_addMethod(c, sel_registerName("addCompletedHandler:"), (IMP)cbAddCompleted, "v@:@?");
+		class_addMethod(c, sel_registerName("addScheduledHandler:"), (IMP)cbAddScheduled, "v@:@?");
+		class_addMethod(c, sel_registerName("status"), (IMP)cbStatus, "Q@:");
+		class_addMethod(c, sel_registerName("error"), (IMP)cbError, "@@:");
+		class_addMethod(c, sel_registerName("commandQueue"), (IMP)cbQueue, "@@:");
+		class_addMethod(c, @selector(device), (IMP)objDevice, "@@:");
+		class_addMethod(c, @selector(label), (IMP)labelGet, "@@:");
+		class_addMethod(c, sel_registerName("setLabel:"), (IMP)labelSet, "v@:@");
+		class_addMethod(c, sel_registerName("retainedReferences"), (IMP)cbRetained, "B@:");
+		class_addMethod(c, sel_registerName("GPUStartTime"), (IMP)cbTime, "d@:");
+		class_addMethod(c, sel_registerName("GPUEndTime"), (IMP)cbTime, "d@:");
+		class_addMethod(c, sel_registerName("kernelStartTime"), (IMP)cbTime, "d@:");
+		class_addMethod(c, sel_registerName("kernelEndTime"), (IMP)cbTime, "d@:");
+		class_addMethod(c, sel_registerName("renderCommandEncoderWithDescriptor:"), (IMP)cbRenderEncoder, "@@:@");
+		class_addMethod(c, sel_registerName("blitCommandEncoder"), (IMP)cbBlitEncoder, "@@:");
+		class_addMethod(c, sel_registerName("blitCommandEncoderWithDescriptor:"), (IMP)cbBlitEncoderD, "@@:@");
+		class_addMethod(c, sel_registerName("computeCommandEncoder"), (IMP)cbComputeEncoder, "@@:");
+		class_addMethod(c, sel_registerName("computeCommandEncoderWithDescriptor:"), (IMP)cbComputeEncoderD, "@@:@");
+		class_addMethod(c, sel_registerName("computeCommandEncoderWithDispatchType:"), (IMP)cbComputeEncoderT, "@@:Q");
+		class_addMethod(c, @selector(dealloc), (IMP)cbDealloc, "v@:");
+		finishClass(c, K_CB);
+	}
+	static const char *const rep_[] = { "MTLRenderCommandEncoder", "MTLCommandEncoder", NULL };
+	if ((gRenderEncClass = makeClass("D2SMetalRenderEncoder", "_MTLCommandEncoder", rep_, K_ENC)) != Nil) {
+		addEncoderMethods(gRenderEncClass);
+		class_addMethod(gRenderEncClass, sel_registerName("setRenderPipelineState:"), (IMP)encSetPipeline, "v@:@");
+		class_addMethod(gRenderEncClass, sel_registerName("drawPrimitives:vertexStart:vertexCount:"), (IMP)encDraw, "v@:QQQ");
+		finishClass(gRenderEncClass, K_ENC);
+	}
+	static const char *const bep[] = { "MTLBlitCommandEncoder", "MTLCommandEncoder", NULL };
+	if ((gBlitEncClass = makeClass("D2SMetalBlitEncoder", "_MTLCommandEncoder", bep, K_ENC)) != Nil) {
+		addEncoderMethods(gBlitEncClass);
+		objc_registerClassPair(gBlitEncClass);
+	}
+	static const char *const cep[] = { "MTLComputeCommandEncoder", "MTLCommandEncoder", NULL };
+	if ((gComputeEncClass = makeClass("D2SMetalComputeEncoder", "_MTLCommandEncoder", cep, K_ENC)) != Nil) {
+		addEncoderMethods(gComputeEncClass);
+		objc_registerClassPair(gComputeEncClass);
 	}
 	addProtocolFamily("MTLDepthStencil");
 	addProtocolFamily("MTLSampler");
