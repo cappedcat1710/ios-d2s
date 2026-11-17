@@ -428,6 +428,7 @@ TEXGET(usage)
 TEXGET(storage)
 TEXGET(samples)
 TEXGET(rowBytes)
+static uint64_t tex_protection(id self, SEL _cmd) { (void)self; (void)_cmd; return 0; }
 static uint64_t tex_type(id self, SEL _cmd) { (void)_cmd; return tex(self)->type; }
 static uint64_t tex_depth(id self, SEL _cmd) { (void)_cmd; return tex(self)->depth ? tex(self)->depth : 1; }
 static uint64_t tex_mips(id self, SEL _cmd) { (void)_cmd; return tex(self)->mips ? tex(self)->mips : 1; }
@@ -812,6 +813,7 @@ d2sMetalLoad(void)
 		class_addMethod(t, sel_registerName("arrayLength"), (IMP)tex_array, "Q@:");
 		class_addMethod(t, sel_registerName("gpuAddress"), (IMP)tex_gpu, "Q@:");
 		class_addMethod(t, sel_registerName("rowBytes"), (IMP)tex_rowBytes, "Q@:");
+		class_addMethod(t, sel_registerName("protectionOptions"), (IMP)tex_protection, "Q@:");
 		class_addMethod(t, sel_registerName("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"), (IMP)texReplace,
 		    "v@:{?={?=QQQ}{?=QQQ}}Q^vQ");
 		class_addMethod(t, sel_registerName("replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:"),

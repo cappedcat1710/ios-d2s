@@ -25,6 +25,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include "d2sgpu.h"
 
 static io_connect_t conn = MACH_PORT_NULL;
@@ -120,11 +121,19 @@ run(void)
 	l.backgroundColor = c;
 	r.layer = l;
 	r.bounds = CGRectMake(0, 0, 64, 64);
-	say("5 CARenderer: renderer and layer made, rendering one frame");
-	[r beginFrameAtTime:CACurrentMediaTime() timeStamp:NULL];
-	[r addUpdateRect:r.bounds];
-	[r render];
-	[r endFrame];
+	[CATransaction flush];
+	say("5 CARenderer: renderer and layer made, rendering frames");
+	for (int f = 0; f < 4; f++) {
+		CFTimeInterval now = CACurrentMediaTime();
+		CFTimeInterval next = [r nextFrameTime];
+		say("5 CARenderer: frame %d: nextFrameTime %.3f (now %.3f)", f, next, now);
+		[r beginFrameAtTime:now timeStamp:NULL];
+		[r addUpdateRect:r.bounds];
+		[r render];
+		[r endFrame];
+		[CATransaction flush];
+		usleep(20000);
+	}
 	say("5 CARenderer: frame submitted, reading back");
 	memset(back, 0, sizeof(back));
 	[t getBytes:back bytesPerRow:256 fromRegion:MTLRegionMake2D(0, 0, 64, 64) mipmapLevel:0];
