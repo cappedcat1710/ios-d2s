@@ -8,7 +8,7 @@ mkdir -p "$OUT"
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 CC=$(xcrun --sdk iphoneos -f clang)
 FLAGS=(-arch arm64 -isysroot "$SDK" -miphoneos-version-min=16.0 -O2 -Wall -I"$HERE/../d2s-gpu")
-"$CC" "${FLAGS[@]}" -fno-objc-arc -bundle -framework Foundation -framework IOKit \
+"$CC" "${FLAGS[@]}" -fno-objc-arc -bundle -framework Foundation -framework IOKit -framework IOSurface \
 	-o "$OUT/D2SMetal" "$HERE/D2SMetal.m"
 "$CC" "${FLAGS[@]}" -fobjc-arc -dynamiclib -install_name /usr/lib/metaltest.dylib \
 	-framework Foundation -framework IOKit -framework Metal -framework QuartzCore -framework CoreGraphics \

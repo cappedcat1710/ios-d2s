@@ -35,6 +35,7 @@
 #include <pthread.h>
 #include <mach/mach.h>
 #include "d2sgpu.h"
+#include <IOSurface/IOSurfaceRef.h>
 
 static Class gBase;			/* _MTLDevice */
 static id gDevice;
@@ -148,8 +149,8 @@ stubForward(id self, SEL _cmd, NSInvocation *inv)
 }
 
 /* every object made here: one pointer of our own state */
-static ptrdiff_t gStateOffset[4];
-enum { K_QUEUE, K_BUFFER, K_TEXTURE };
+static ptrdiff_t gStateOffset[5];
+enum { K_QUEUE, K_BUFFER, K_TEXTURE, K_PIPE };
 
 static void **
 stateOf(id obj, int kind)
@@ -342,6 +343,8 @@ struct texture {
 	void *plain;
 	uint64_t width, height, depth, pixelFormat, type, usage, storage, mips, samples, arrayLength;
 	uint64_t bpp, rowBytes;
+	IOSurfaceRef surface;		/* a texture over an IOSurface: its pages, its row bytes */
+	uint8_t *surfaceBase;
 };
 
 static uint64_t
@@ -438,7 +441,7 @@ typedef struct { D2SOrigin o; D2SSize s; } D2SRegion;
 static uint8_t *
 texBase(struct texture *t)
 {
-	return t->plain ? t->plain : t->b.cpu;
+	return t->surfaceBase ? t->surfaceBase : t->plain ? t->plain : t->b.cpu;
 }
 
 static void
@@ -492,6 +495,9 @@ textureDealloc(id self, SEL _cmd)
 			d2sgpu_buf_destroy(gConn, &t->b);
 		}
 		free(t->plain);
+		if (t->surface != NULL) {
+			CFRelease(t->surface);
+		}
 		[t->c.label release];
 		free(t);
 	}
@@ -585,6 +591,141 @@ deviceNewBufferNoCopy(id s, SEL c, void *bytes, uint64_t length, uint64_t option
 	return bufferMake(length, options, bytes);
 }
 
+/* -newTextureWithDescriptor:iosurface:plane: the window server's screens and layers */
+static id
+deviceNewSurfaceTexture(id self, SEL _cmd, id desc, IOSurfaceRef surf, uint64_t plane)
+{
+	(void)self; (void)_cmd;
+	if (surf == NULL) {
+		return nil;
+	}
+	struct texture *t = calloc(1, sizeof(*t));
+	t->width = DESC(desc, width);
+	t->height = DESC(desc, height);
+	t->depth = 1;
+	t->pixelFormat = DESC(desc, pixelFormat);
+	t->type = DESC(desc, textureType);
+	t->usage = DESC(desc, usage);
+	t->storage = DESC(desc, storageMode);
+	t->mips = 1;
+	t->samples = 1;
+	t->arrayLength = 1;
+	t->bpp = bytesPerPixel(t->pixelFormat);
+	t->surface = (IOSurfaceRef)CFRetain(surf);
+	t->rowBytes = IOSurfaceGetBytesPerRowOfPlane(surf, plane);
+	t->surfaceBase = IOSurfaceGetBaseAddressOfPlane(surf, plane);
+	io_connect_t c = gpu();
+	if (c != MACH_PORT_NULL && d2sgpu_import_surface(c, IOSurfaceGetID(surf), D2SGPU_BUF_GPU_WRITE, &t->b) != KERN_SUCCESS) {
+		memset(&t->b, 0, sizeof(t->b));
+	}
+	static int logged;
+	if (logged++ < 12) {
+		sayc("newTexture over IOSurface %u plane %llu: %llux%llu fmt %llu row %llu gpu %#llx", IOSurfaceGetID(surf),
+		    plane, t->width, t->height, t->pixelFormat, t->rowBytes, t->b.gpu_va);
+	}
+	id obj = class_createInstance(gTextureClass, 0);
+	obj = ((id (*)(id, SEL))objc_msgSend)(obj, @selector(init));
+	*stateOf(obj, K_TEXTURE) = t;
+	return obj;
+}
+
+/*
+ * State objects: Metal's own base classes keep the descriptor's values
+ * (their -initWithDevice:...Descriptor:); ours only add the logged stub.
+ * Pipelines hold their descriptor too, so the draw path can read the
+ * vertex/fragment functions, formats and blending from them later.
+ */
+static Class gDepthClass, gSamplerClass, gRenderPipeClass, gComputePipeClass;
+
+static id
+deviceNewDepth(id self, SEL _cmd, id desc)
+{
+	(void)_cmd;
+	id o = class_createInstance(gDepthClass, 0);
+	return ((id (*)(id, SEL, id, id))objc_msgSend)(o, sel_registerName("initWithDevice:depthStencilDescriptor:"), self, desc);
+}
+
+static id
+deviceNewSampler(id self, SEL _cmd, id desc)
+{
+	(void)_cmd;
+	id o = class_createInstance(gSamplerClass, 0);
+	return ((id (*)(id, SEL, id, id))objc_msgSend)(o, sel_registerName("initWithDevice:samplerDescriptor:"), self, desc);
+}
+
+static const char *
+fnName(id fn)
+{
+	if (fn == nil) {
+		return "-";
+	}
+	id n = ((id (*)(id, SEL))objc_msgSend)(fn, @selector(name));
+	return n ? [n UTF8String] : "?";
+}
+
+static id
+renderPipe(id self, id desc)
+{
+	id vf = ((id (*)(id, SEL))objc_msgSend)(desc, sel_registerName("vertexFunction"));
+	id ff = ((id (*)(id, SEL))objc_msgSend)(desc, sel_registerName("fragmentFunction"));
+	static int logged;
+	if (logged++ < 40) {
+		sayc("newRenderPipelineState: vertex %s fragment %s", fnName(vf), fnName(ff));
+	}
+	id o = class_createInstance(gRenderPipeClass, 0);
+	o = ((id (*)(id, SEL, id, id))objc_msgSend)(o, sel_registerName("initWithDevice:pipelineStateDescriptor:"), self, desc);
+	if (o != nil) {
+		*stateOf(o, K_PIPE) = [desc copy];
+	}
+	return o;
+}
+
+static id
+deviceNewRenderPipe(id s, SEL c, id d, id *err)
+{
+	(void)c;
+	if (err) {
+		*err = nil;
+	}
+	return renderPipe(s, d);
+}
+
+static id
+deviceNewRenderPipeOpt(id s, SEL c, id d, uint64_t opt, id *refl, id *err)
+{
+	(void)c; (void)opt;
+	if (refl) {
+		*refl = nil;
+	}
+	if (err) {
+		*err = nil;
+	}
+	return renderPipe(s, d);
+}
+
+static void
+deviceNewRenderPipeAsync(id s, SEL c, id d, void (^done)(id, id))
+{
+	(void)c;
+	id p = renderPipe(s, d);
+	if (done) {
+		done(p, nil);
+	}
+	[p release];
+}
+
+static id
+deviceNewComputePipe(id self, SEL _cmd, id fn, id *err)
+{
+	(void)_cmd;
+	if (err) {
+		*err = nil;
+	}
+	sayc("newComputePipelineState: %s (no compute yet)", fnName(fn));
+	id o = class_createInstance(gComputePipeClass, 0);
+	return ((id (*)(id, SEL))objc_msgSend)(o, @selector(init));
+}
+
 __attribute__((constructor)) static void
 d2sMetalLoad(void)
 {
@@ -662,6 +803,27 @@ d2sMetalLoad(void)
 		finishClass(t, K_TEXTURE);
 	}
 
+	static const char *const dsp[] = { "MTLDepthStencilState", "MTLDepthStencilStateSPI", NULL };
+	if ((gDepthClass = makeClass("D2SMetalDepthStencilState", "_MTLDepthStencilState", dsp, 0)) != Nil) {
+		objc_registerClassPair(gDepthClass);
+	}
+	static const char *const ssp[] = { "MTLSamplerState", "MTLSamplerStateSPI", NULL };
+	if ((gSamplerClass = makeClass("D2SMetalSamplerState", "_MTLSamplerState", ssp, 0)) != Nil) {
+		objc_registerClassPair(gSamplerClass);
+	}
+	static const char *const rpp[] = { "MTLRenderPipelineState", "MTLRenderPipelineStateSPI", NULL };
+	if ((gRenderPipeClass = makeClass("D2SMetalRenderPipelineState", "_MTLRenderPipelineState", rpp, K_PIPE)) != Nil) {
+		finishClass(gRenderPipeClass, K_PIPE);
+	}
+	static const char *const cpp[] = { "MTLComputePipelineState", "MTLComputePipelineStateSPI", NULL };
+	if ((gComputePipeClass = makeClass("D2SMetalComputePipelineState", "_MTLComputePipelineState", cpp, 0)) != Nil) {
+		objc_registerClassPair(gComputePipeClass);
+	}
+	addProtocolFamily("MTLDepthStencil");
+	addProtocolFamily("MTLSampler");
+	addProtocolFamily("MTLRenderPipeline");
+	addProtocolFamily("MTLComputePipeline");
+
 	Class cls = objc_allocateClassPair(gBase, "D2SMetalDevice", 0);
 	if (cls == Nil) {
 		sayc("could not make D2SMetalDevice");
@@ -695,6 +857,15 @@ d2sMetalLoad(void)
 	class_addMethod(cls, sel_registerName("newBufferWithBytesNoCopy:length:options:deallocator:"),
 	    (IMP)deviceNewBufferNoCopy, "@@:^vQQ@?");
 	class_addMethod(cls, sel_registerName("newTextureWithDescriptor:"), (IMP)deviceNewTexture, "@@:@");
+	class_addMethod(cls, sel_registerName("newTextureWithDescriptor:iosurface:plane:"), (IMP)deviceNewSurfaceTexture, "@@:@^{__IOSurface=}Q");
+	class_addMethod(cls, sel_registerName("newDepthStencilStateWithDescriptor:"), (IMP)deviceNewDepth, "@@:@");
+	class_addMethod(cls, sel_registerName("newSamplerStateWithDescriptor:"), (IMP)deviceNewSampler, "@@:@");
+	class_addMethod(cls, sel_registerName("newRenderPipelineStateWithDescriptor:error:"), (IMP)deviceNewRenderPipe, "@@:@^@");
+	class_addMethod(cls, sel_registerName("newRenderPipelineStateWithDescriptor:options:reflection:error:"),
+	    (IMP)deviceNewRenderPipeOpt, "@@:@Q^@^@");
+	class_addMethod(cls, sel_registerName("newRenderPipelineStateWithDescriptor:completionHandler:"),
+	    (IMP)deviceNewRenderPipeAsync, "v@:@@?");
+	class_addMethod(cls, sel_registerName("newComputePipelineStateWithFunction:error:"), (IMP)deviceNewComputePipe, "@@:@^@");
 	class_addMethod(cls, @selector(methodSignatureForSelector:), (IMP)stubSignature, "@@::");
 	class_addMethod(cls, @selector(forwardInvocation:), (IMP)stubForward, "v@:@");
 	objc_registerClassPair(cls);
