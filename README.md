@@ -1,3 +1,24 @@
+# iOS on the Samsung Galaxy Note 10+ (d2s), fork
+
+**Fork of [gorkemoji/ios-d2s](https://github.com/gorkemoji/ios-d2s): iOS 16.7 on the Samsung Galaxy Note 10+ (SM-N975F, Exynos 9825, `d2s`).** Apple's open-source XNU (xnu-8796) with the unmodified iOS 16.7.16 userland, booted from a custom loader. Experimental hobby bring-up, not a usable phone OS. Installing it erases Android data on the phone; keep a backup of your boot image.
+
+Work in this fork (branch `d2s-smp`, details in `xnu/patches/` and `tools/`):
+
+| Area | State |
+| --- | --- |
+| CPU | All 8 cores start and run (patch 0137: the A75's MT-style MPIDR is normalised to the core number PSCI and the device tree use). Boots to the lock screen with touch and volume keys on 3, 4, 6, 7 and 8 cores |
+| GPU | Mali-G76 MC12: kernel driver (`bsd/dev/d2s_gpu.c`, patches 0131-0135), a user client, and Mesa Panfrost running inside backboardd over a libdrm stand-in (`tools/d2s-gl`). Clear and textured-quad-with-blend tests pass on IOSurface targets. CoreAnimation still draws on the CPU |
+| Metal | Bring-up started: `IOAcceleratorES` service naming a Metal plug-in (patch 0138), directory support for boot files (0139), `tools/d2s-metal` plug-in skeleton that logs what Metal asks for. No drawing yet. Plan: `tools/d2s-metal/PLAN.md` |
+| Not done | RAM beyond the first bring-up, Wi-Fi, Bluetooth, battery, modem, camera |
+
+Build: kernel patches build in CI (`.github/workflows/xnu.yml`, run with `-f runner=macos-15-intel`); the GPU/Metal userland builds with `d2s-gl.yml` (`-f what=all|gl|metal`). Images are packed with `tools/d2s_make_boot.py`; user-space files ride in the boot image via `tools/mkfiles.py`.
+
+Thanks to the upstream authors and to [hakios](https://github.com/oosexgang/hakios-xnu-kernel) and [ios-sailfish](https://github.com/joranv1/ios-sailfish), whose public write-ups guided the GPU and Metal approach. Not affiliated with Apple; no Apple binaries are in this repository.
+
+---
+
+# Upstream README (Galaxy S8)
+
 # iOS on the Samsung Galaxy S8
 
 **iOS 16.7 on the Samsung Galaxy S8 (SM-G950F, Exynos 8895, `dreamlte`).**
