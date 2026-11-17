@@ -609,6 +609,7 @@ d2sMetalLoad(void)
 	static const char *const qp[] = { "MTLCommandQueue", "MTLCommandQueueSPI", NULL };
 	gQueueClass = makeClass("D2SMetalCommandQueue", "_MTLCommandQueue", qp, K_QUEUE);
 	if (gQueueClass != Nil) {
+		class_addMethod(gQueueClass, @selector(device), (IMP)objDevice, "@@:");
 		finishClass(gQueueClass, K_QUEUE);
 	}
 
