@@ -80,6 +80,21 @@ deviceRegistryID(id self, SEL _cmd)
 	return gPort;
 }
 
+/* what Metal asks of every device before it will use it: sizes and the feature level of an Apple GPU family 4 (A11) */
+static uint64_t
+deviceMaxBufferLength(id self, SEL _cmd)
+{
+	(void)self; (void)_cmd;
+	return 256ull << 20;
+}
+
+static uint64_t
+deviceFeatureProfile(id self, SEL _cmd)
+{
+	(void)self; (void)_cmd;
+	return 11;	/* MTLFeatureSet_iOS_GPUFamily4_v1 (guess, to see what Metal asks next) */
+}
+
 /* a signature for a message the device does not implement: from the Metal protocols, so the stub knows the return size */
 static id
 deviceSignature(id self, SEL _cmd, SEL selector)
@@ -151,6 +166,8 @@ d2sMetalLoad(void)
 	class_addMethod(cls, sel_registerName("initWithAcceleratorPort:"), (IMP)deviceInit, "@@:I");
 	class_addMethod(cls, sel_registerName("name"), (IMP)deviceName, "@@:");
 	class_addMethod(cls, sel_registerName("registryID"), (IMP)deviceRegistryID, "Q@:");
+	class_addMethod(cls, sel_registerName("maxBufferLength"), (IMP)deviceMaxBufferLength, "Q@:");
+	class_addMethod(cls, sel_registerName("featureProfile"), (IMP)deviceFeatureProfile, "Q@:");
 	class_addMethod(cls, sel_registerName("methodSignatureForSelector:"), (IMP)deviceSignature, "@@::");
 	class_addMethod(cls, sel_registerName("forwardInvocation:"), (IMP)deviceForward, "v@:@");
 	objc_registerClassPair(cls);
