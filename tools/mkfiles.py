@@ -3,7 +3,8 @@
 
   mkfiles.py OUT.bin SPEC [SPEC ...]
 
-SPEC is DEST=SRC[,mode=0755][,uid=0][,gid=0][,if-absent]. DEST is an absolute
+SPEC is DEST=SRC[,mode=0755][,uid=0][,gid=0][,if-absent], or DEST=@dir[,mode=0755]
+to make a directory (kernel op 3; parents first, an existing one is kept). DEST is an absolute
 path in the iOS root and may contain {hash8}: the first 8 hex digits of the
 file's SHA-256, so a new build lands in a new file and never overwrites a
 library a running process has loaded. Prints each final DEST.
@@ -47,7 +48,11 @@ def main():
                     gid = int(v)
                 else:
                     sys.exit(f'unknown option {o}')
-        data = open(src, 'rb').read()
+        if src == '@dir':
+            op, data = 3, b''
+            mode = mode if any(o.startswith('mode=') for o in opts) else 0o755
+        else:
+            data = open(src, 'rb').read()
         dest = dest.replace('{hash8}', hashlib.sha256(data).hexdigest()[:8])
         if not dest.startswith('/'):
             sys.exit(f'{dest}: not an absolute path')

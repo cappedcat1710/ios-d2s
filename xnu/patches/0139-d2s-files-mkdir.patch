@@ -1,0 +1,75 @@
+diff --git a/bsd/kern/d2s_files.c b/bsd/kern/d2s_files.c
+--- a/bsd/kern/d2s_files.c
++++ b/bsd/kern/d2s_files.c
+@@ -26,6 +26,7 @@
+ #include <sys/vnode_internal.h>	/* vnode_setsize, rootvnode */
+ #include <sys/kauth.h>
+ #include <sys/proc.h>
++#include <sys/namei.h>
+ #include <kern/thread.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+@@ -40,6 +41,7 @@
+ 
+ #define OP_WRITE		1
+ #define OP_WRITE_IF_ABSENT	2
++#define OP_MKDIR		3	/* make the directory (mode, uid, gid); an existing one is kept */
+ 
+ struct d2s_file_rec {
+ 	uint32_t size;
+@@ -91,6 +93,45 @@
+ 	return err;
+ }
+ 
++/* op 3: make one directory (parents must exist; list them first). Like mkdir1at(). */
++static int
++mkdir_one(const char *path, const struct d2s_file_rec *r)
++{
++	vfs_context_t ctx = vfs_context_kernel();
++	struct nameidata nd;
++	struct vnode_attr va;
++	vnode_t dvp, vp = NULLVP;
++	int err;
++
++	NDINIT(&nd, CREATE, OP_MKDIR, LOCKPARENT | AUDITVNPATH1, UIO_SYSSPACE,
++	    CAST_USER_ADDR_T(path), ctx);
++	nd.ni_cnd.cn_flags |= WILLBEDIR;
++	err = namei(&nd);
++	if (err) {
++		return err;
++	}
++	dvp = nd.ni_dvp;
++	if (nd.ni_vp != NULLVP) {
++		err = EEXIST;
++	} else {
++		VATTR_INIT(&va);
++		VATTR_SET(&va, va_type, VDIR);
++		VATTR_SET(&va, va_mode, r->mode & 07777);
++		VATTR_SET(&va, va_uid, r->uid);
++		VATTR_SET(&va, va_gid, r->gid);
++		err = vn_create(dvp, &vp, &nd, &va, 0, 0, NULL, ctx);
++	}
++	nameidone(&nd);
++	if (vp != NULLVP) {
++		vnode_put(vp);
++	}
++	if (nd.ni_vp != NULLVP) {
++		vnode_put(nd.ni_vp);
++	}
++	vnode_put(dvp);
++	return err;
++}
++
+ static void
+ install(void)
+ {
+@@ -110,7 +151,8 @@
+ 			bad++;
+ 			break;
+ 		}
+-		int err = write_one(path, (const uint8_t *)r + data_off, r->data_len, r);
++		int err = r->op == OP_MKDIR ? mkdir_one(path, r) :
++		    write_one(path, (const uint8_t *)r + data_off, r->data_len, r);
+ 		if (err == EEXIST) {
+ 			kept++;
+ 		} else if (err) {

@@ -1,0 +1,78 @@
+diff --git a/iokit/Kernel/arm/D2SAccelerator.cpp b/iokit/Kernel/arm/D2SAccelerator.cpp
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/iokit/Kernel/arm/D2SAccelerator.cpp
+@@ -0,0 +1,46 @@
++/*
++ * Galaxy Note 10+ (d2s): the graphics accelerator service CoreAnimation and
++ * Metal look for. Metal finds the IOKit service of class IOAcceleratorES,
++ * reads its MetalPluginName and MetalPluginClassName, opens
++ * /System/Library/Extensions/<name>.bundle and takes that class as the
++ * system's MTLDevice (a subclass of Metal's private _MTLDevice).
++ *
++ * Boot-arg metal=1 sets the two properties (userland: D2SMetal.bundle). Without
++ * it the service has neither, and CoreAnimation keeps its current renderer.
++ * Idea and flow after hakios' MiniIOMobileFramebuffer accelerator (MIT).
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(D2S)
++#include <IOKit/IOService.h>
++#include <IOKit/IOLib.h>
++#include <pexpert/pexpert.h>
++
++class IOAcceleratorES : public IOService
++{
++	OSDeclareDefaultStructors(IOAcceleratorES);
++
++public:
++	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
++
++bool
++IOAcceleratorES::start(IOService *provider)
++{
++	uint32_t metal = 0;
++
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setName("sgx");
++	if (PE_parse_boot_argn("metal", &metal, sizeof(metal)) && metal != 0) {
++		setProperty("MetalPluginName", "D2SMetal");
++		setProperty("MetalPluginClassName", "D2SMetalDevice");
++		IOLog("D2S Accelerator: metal=1: IOAcceleratorES names D2SMetal as its Metal plug-in\n");
++	}
++	registerService();
++	return true;
++}
++#endif /* D2S */
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -102,6 +102,11 @@
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = D2SGPU;"
+     "   },"
++    "   {"
++    "     'IOClass'         = IOAcceleratorES;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = IOAcceleratorES;"
++    "   },"
+ #endif
+ #endif
+     "   {"
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -16,6 +16,7 @@
+ iokit/Kernel/arm/SweetSurface.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
++iokit/Kernel/arm/D2SAccelerator.cpp                              optional iokitcpp
+ iokit/Kernel/arm/D2SGPU.cpp                                      optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
