@@ -524,6 +524,30 @@ static uint64_t deviceRegistryID(id s, SEL c) { (void)s; (void)c; return gPort; 
 static uint64_t deviceMaxBufferLength(id s, SEL c) { (void)s; (void)c; return 256ull << 20; }
 /* initLimits switches on 0,1,4..9; 7 gives 8 colour attachments (A11-class guess) */
 static uint64_t deviceFeatureProfile(id s, SEL c) { (void)s; (void)c; return 7; }
+/*
+ * -targetDeviceInfo: the struct Metal reads by pointer (type r^{MTLTargetDeviceArch=QI*}).
+ * MTLPipelineLibraryBuilder::newLibraryWithFile formats name into
+ * "<lib>.pipelinelib/pipelines.<name>"; _MTLDevice's own answer is NULL, which
+ * that caller dereferences (boot 16). Layout as documented by hakios (MIT).
+ */
+struct d2s_target_arch {
+	uint64_t target;
+	uint32_t version;
+	const char *name;
+};
+static struct d2s_target_arch gTarget = { 0, 0, "D2SMali-G76MC12" };
+
+static const struct d2s_target_arch *
+deviceTargetInfo(id s, SEL c)
+{
+	(void)s; (void)c;
+	static int logged;
+	if (logged++ == 0) {
+		sayc("targetDeviceInfo asked: pipelines.%s (no precompiled pipelines for this GPU)", gTarget.name);
+	}
+	return &gTarget;
+}
+
 static BOOL deviceYes(id s, SEL c) { (void)s; (void)c; return YES; }
 static BOOL deviceNo(id s, SEL c) { (void)s; (void)c; return NO; }
 static uint64_t deviceWorkingSet(id s, SEL c) { (void)s; (void)c; return 1ull << 30; }
@@ -841,6 +865,7 @@ d2sMetalLoad(void)
 	class_addMethod(cls, sel_registerName("registryID"), (IMP)deviceRegistryID, "Q@:");
 	class_addMethod(cls, sel_registerName("maxBufferLength"), (IMP)deviceMaxBufferLength, "Q@:");
 	class_addMethod(cls, sel_registerName("featureProfile"), (IMP)deviceFeatureProfile, "Q@:");
+	class_addMethod(cls, sel_registerName("targetDeviceInfo"), (IMP)deviceTargetInfo, "r^{MTLTargetDeviceArch=QI*}16@0:8");
 	class_addMethod(cls, sel_registerName("hasUnifiedMemory"), (IMP)deviceYes, "B@:");
 	class_addMethod(cls, sel_registerName("isLowPower"), (IMP)deviceYes, "B@:");
 	class_addMethod(cls, sel_registerName("isHeadless"), (IMP)deviceNo, "B@:");
